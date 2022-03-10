@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Poetry of NLP Workshop SageMaker Stack
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.0.0/20
+      VpcId: !Ref VPC
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.32.0/20
+      VpcId: !Ref VPC
+Outputs:
+  NetworkStackName:
+    Description: AWS CloudFormation Stack Name for Network Stack
+    Value: !Ref AWS::StackName
+    Export:
+      Name: NetworkStackName
+  VpcId:
+    Description: VPC for Amazon SageMaker Domain
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-Vpc-Id
+  PrivateSubnetId:
+    Description: Private Subnet ID
+    Value: !Ref PrivateSubnet
+    Export:
+      Name: !Sub ${AWS::StackName}-Private-Subnet-Id
+  PublicSubnetId:
+    Description: Public Subnet ID
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub ${AWS::StackName}-Public-Subnet-Id

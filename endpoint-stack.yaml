@@ -1,0 +1,366 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Poetry of NLP Workshop Endpoint Stack
+Parameters:
+  InfraResourcesBucket:
+    Type: String
+    Description: Amazon S3 bucket containing environment creation resources
+  SageMakerStackName:
+    Type: String
+    Description: The name of the Stack with the SageMaker domain
+  StorageStackName:
+    Type: String
+    Description: The name of the Storage Stack
+Resources:
+  GPT2Model:
+    Type: "AWS::SageMaker::Model"
+    Properties:
+      ModelName: GPT2
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub ${SageMakerStackName}-SageMaker-Execution-Role-Arn
+      PrimaryContainer:
+        Image: !Sub 763104351884.dkr.ecr.${AWS::Region}.amazonaws.com/huggingface-pytorch-inference:1.7.1-transformers4.6.1-cpu-py36-ubuntu18.04
+        Mode: MultiModel
+        ModelDataUrl: !Sub s3://${InfraResourcesBucket}/gpt-2/model.tar.gz
+        MultiModelConfig:
+          ModelCacheSetting: Enabled
+  EndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: NLPPoetryLabMME
+      ProductionVariants:
+        -
+          InitialInstanceCount: 1
+          InitialVariantWeight: 1
+          InstanceType: ml.m5.xlarge
+          ModelName: !GetAtt GPT2Model.ModelName
+          VariantName: BaseModel
+  MultiModelEndpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointConfigName: !GetAtt EndpointConfig.EndpointConfigName
+  ParameterStoreEndpointName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: hf-endpoint
+      Type: String
+      Value: !GetAtt MultiModelEndpoint.EndpointName
+  GPTJModel:
+    Type: AWS::SageMaker::Model
+    Properties:
+      ModelName: GPTJ
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub ${SageMakerStackName}-SageMaker-Execution-Role-Arn
+      PrimaryContainer:
+        Image: !Sub 763104351884.dkr.ecr.${AWS::Region}.amazonaws.com/huggingface-pytorch-inference:1.7.1-transformers4.6.1-cpu-py36-ubuntu18.04
+        Mode: SingleModel
+        ModelDataUrl: !Sub s3://${InfraResourcesBucket}/gpt-j/model.tar.gz
+  GPTJEndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: GPTJ
+      ProductionVariants:
+        - InitialInstanceCount: 1
+          InitialVariantWeight: 1
+          InstanceType: ml.m5.2xlarge
+          ModelName: !GetAtt GPTJModel.ModelName
+          VariantName: BaseModel
+  GPTJModelEndpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointConfigName: !GetAtt GPTJEndpointConfig.EndpointConfigName
+  ParameterStoreGPTJEndpointName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: gptj-endpoint
+      Type: String
+      Value: !GetAtt GPTJModelEndpoint.EndpointName
+  PipelineFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  S3InvokeFunctionPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt StartPipelineFunction.Arn
+      Principal: "s3.amazonaws.com"
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn:
+        Fn::ImportValue: !Sub ${StorageStackName}-Data-Pipeline-Bucket-Arn
+  ReadParameterStoreFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Reads parameter store and returns values for use in SageMaker Pipeline
+      Runtime: python3.8
+      Handler: handler.handler
+      Role: !GetAtt PipelineFunctionsRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          PARAM_ENDPOINT = 'hf-endpoint'
+          PARAM_TEST = 'hf-test-data'
+          PARAM_ARTIFACT = 'hf-s3-location'
+
+
+          def lambda_handler(event, context):
+              ssm_client = boto3.client("ssm")
+
+              response = ssm_client.get_parameter(
+                  Name=PARAM_ENDPOINT
+              )
+              endpoint = response['Parameter']['Value']
+
+              response = ssm_client.get_parameter(
+                  Name=PARAM_TEST
+              )
+              test_s3 = response['Parameter']['Value']
+
+              response = ssm_client.get_parameter(
+                  Name=PARAM_ARTIFACT
+              )
+              artifact_s3 = response['Parameter']['Value']
+
+              return {
+                  "statusCode": 200,
+                  "endpoint": json.dumps(endpoint),
+                  "test_s3": json.dumps(test_s3),
+                  "artifact_s3": json.dumps(artifact_s3)
+              }
+  CopyModelArtifactFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Reads parameter store and returns values for use in SageMaker Pipeline
+      Runtime: python3.8
+      Handler: handler.handler
+      Role: !GetAtt PipelineFunctionsRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from urllib.parse import urlparse
+
+          def lambda_handler(event, context):
+
+              s3_client = boto3.client("s3")
+
+              input_artifact = event["model_path"]
+              artifact_path = event["artifact_path"].lstrip('"').rstrip('"')
+
+              print("got input artifact {0} and artifact path {1}".format(input_artifact, artifact_path))
+
+              input_p = urlparse(input_artifact)
+              artifact_p = urlparse(artifact_path)
+
+              input_key = input_p.path.lstrip('/')
+              input_bucket = input_p.netloc
+              input_name = input_p.path.split('/')[-1]
+
+              print("Input key = {0}, input bucket = {1}, input name = {2}".format(input_key, input_bucket, input_name))
+
+              artifact_key = artifact_p.path.lstrip('/') + input_name
+              artifact_bucket = artifact_p.netloc
+
+              print("Artifact key = {0}, artifact bucket = {1}".format(artifact_key, artifact_bucket))
+
+              copy_source = {
+                  'Bucket': input_bucket,
+                  'Key': input_key
+              }
+              s3_client.copy(copy_source, artifact_bucket, artifact_key)
+              print("Copying {0} to {1}/{2}".format(json.dumps(copy_source), artifact_bucket, artifact_key))
+
+              return {
+                  "statusCode": 200,
+                  "model_key": input_name
+              }
+  InvokeModelFromMMEFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Reads parameter store and returns values for use in SageMaker Pipeline
+      Runtime: python3.8
+      Handler: handler.handler
+      Role: !GetAtt PipelineFunctionsRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from urllib.parse import urlparse
+
+          TMP_FILE = '/tmp/body.txt'
+
+          def lambda_handler(event, context):
+
+              sm_client = boto3.client("sagemaker-runtime")
+              s3_client = boto3.client("s3")
+
+              endpoint = event["endpoint"].lstrip('"').rstrip('"')
+              model = event["model"]
+              test = event["test"].lstrip('"').rstrip('"')
+
+              print("endpoint = {0}, model = {1}, test = {2}".format(endpoint, model, test))
+
+              test_p = urlparse(test)
+
+              s3_client.download_file(test_p.netloc, test_p.path.lstrip('/'), TMP_FILE)
+
+              with open(TMP_FILE, 'r') as F:
+                  input_data = {'input': F.read() }
+                  print(f"{input_data}")
+                  response = sm_client.invoke_endpoint(
+                                      EndpointName = endpoint,
+                                      ContentType  = "application/json",
+                                      TargetModel  = model,
+                                      Body         = json.dumps(input_data).encode('utf-8'))
+                  output = response['Body'].read().decode("utf-8")
+
+              return {
+                  "statusCode": 200,
+                  "inference": output
+              }
+  StartPipelineFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      MemorySize: 1024
+      Runtime: "python3.8"
+      Timeout: 300
+      Role: !GetAtt PipelineFunctionsRole.Arn
+      Handler: "index.handler"
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import traceback
+
+          client = boto3.client('sagemaker')
+          pname = os.environ['PipelineName']
+
+          def lambda_handler(event, context):
+            try:
+              files = []
+              for record in event['Records']:
+                bucket = record['s3']['bucket']['name']
+                key = record['s3']['object']['key']
+                files.append(key)
+                print("Detected create event: { 0 }/{1}".format(bucket, key))
+
+              response = client.start_pipeline_execution(
+              PipelineName=pname,
+              PipelineParameters=[
+              {
+              'Name': 'ModelLocation',
+              'Value': f"s3://{bucket}/{key}"
+          }
+          ],
+            PipelineExecutionDescription=f"Execution for {','.join(files)}",
+            )
+            except Exception as e:
+              trc = traceback.format_exc()
+              print("Error launching pipeline {0}: { 1 } - { 2 }".format(pname, str(e), trc))
+      Environment:
+        Variables:
+          PipelineName: “huggingfacedeploypipeline”
+  PoeticPipeline:
+    Type: AWS::SageMaker::Pipeline
+    Properties:
+      PipelineDefinition:
+        PipelineDefinitionBody: !Sub |
+          {
+            "Version":"2020-12-01",
+            "Metadata":{},
+            "Parameters":[
+              {
+                "Name":"ModelLocation",
+                "Type":"String",
+                "DefaultValue":"s3://"
+              }],
+            "PipelineExperimentConfig":{
+              "ExperimentName":{
+                "Get":"Execution.PipelineName"
+              },
+            "TrialName":{
+              "Get":"Execution.PipelineExecutionId"}
+            },
+            "Steps":[
+              {
+                "Name":"ReadParamsStep",
+                "Type":"Lambda",
+                "Arguments":{},
+                "FunctionArn":"${ReadParameterStoreFunction.Arn}",
+                "OutputParameters":[
+                  {
+                    "OutputName":"endpoint",
+                    "OutputType":"String"
+                  },
+                  {
+                    "OutputName":"test_s3",
+                    "OutputType":"String"
+                  },
+                  {
+                    "OutputName":"artifact_s3",
+                    "OutputType":"String"
+                  }
+                ]
+              },
+              {
+                "Name":"CopyArtifactStep",
+                "Type":"Lambda",
+                "Arguments":{
+                  "model_path":{
+                    "Get":"Parameters.ModelLocation"
+                  },
+                  "artifact_path":{
+                    "Get":"Steps.ReadParamsStep.OutputParameters['artifact_s3']"
+                  }
+                },
+                "FunctionArn":"${CopyModelArtifactFunction.Arn}",
+                "OutputParameters":[
+                  {
+                    "OutputName":"model_key",
+                    "OutputType":"String"
+                  }
+                ]
+              },
+              {
+                "Name":"TestStep",
+                "Type":"Lambda",
+                "Arguments":{
+                  "endpoint":{
+                    "Get":"Steps.ReadParamsStep.OutputParameters['endpoint']"
+                  },
+                  "model":{
+                    "Get":"Steps.CopyArtifactStep.OutputParameters['model_key']"
+                  },
+                  "test":{
+                    "Get":"Steps.ReadParamsStep.OutputParameters['test_s3']"}
+                  },
+                  "FunctionArn":"${InvokeModelFromMMEFunction.Arn}",
+                  "OutputParameters":[
+                    {
+                      "OutputName":"inference",
+                      "OutputType":"String"
+                    }
+                  ]
+              }
+            ]
+          }
+      PipelineDescription: Pipeline for poets
+      PipelineDisplayName: PoetryOfNLP
+      PipelineName: PoetryOfNLP
+      RoleArn: !GetAtt PipelineFunctionsRole.Arn
+
+

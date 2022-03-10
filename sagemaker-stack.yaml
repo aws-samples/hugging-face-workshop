@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Poetry of NLP Workshop SageMaker Stack
+Parameters:
+  NetworkStackName:
+    Type: String
+    Description: AWS CloudFormation Stack Name for Network Stack
+  InfraResourcesBucket:
+    Type: String
+    Description: Amazon S3 bucket containing environment creation resources
+Resources:
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AWSCodeCommitPowerUser
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  SageMakerDomain:
+    Type: AWS::SageMaker::Domain
+    Properties:
+      DomainName: NLPWorkshop
+      AuthMode: IAM
+      DefaultUserSettings:
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+      SubnetIds:
+        - Fn::ImportValue: !Sub ${NetworkStackName}-Private-Subnet-Id
+      VpcId:
+        Fn::ImportValue: !Sub ${NetworkStackName}-Vpc-Id
+  SageMakerUser:
+    Type: AWS::SageMaker::UserProfile
+    Properties:
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: LabUser
+  JupyterApp:
+    Type: AWS::SageMaker::App
+    DependsOn: SageMakerUser
+    Properties:
+      AppName: default
+      AppType: JupyterServer
+      DomainId: !GetAtt SageMakerDomain.DomainId
+      UserProfileName: LabUser
+  SourceRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      Code:
+        BranchName: main
+        S3:
+          Bucket: !Ref InfraResourcesBucket
+          Key: notebooks.zip
+      RepositoryDescription: Poetry of NLP Workshop resources
+      RepositoryName: poetry-nlp
+  SageMakerCodeRepository:
+    Type: AWS::SageMaker::CodeRepository
+    Properties:
+      CodeRepositoryName: poetry-nlp
+      GitConfig:
+        Branch: main
+        RepositoryUrl: !GetAtt SourceRepo.CloneUrlHttp
+  ParameterModelStoreLocation:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: hf-s3-location
+      Type: String
+      Value: !Sub s3://sagemaker-${AWS::Region}-${AWS::AccountId}/multi-model
+Outputs:
+  SageMakerStackName:
+    Description: AWS CloudFormation Stack Name for SageMaker Stack
+    Value: !Ref AWS::StackName
+    Export:
+      Name: SageMakerStackName
+  SageMakerExecutionRoleArn:
+    Description: ARN for the SageMaker Execution Role
+    Value: !GetAtt SageMakerExecutionRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-SageMaker-Execution-Role-Arn

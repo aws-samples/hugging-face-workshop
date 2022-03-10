@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Poetry of NLP Workshop Storage Stack
+Resources:
+  ModelStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "sagemaker-models-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  DataPipelineBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "data-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  ParameterStoreTestDataLocation:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: hf-test-data
+      Type: String
+      Value: !Sub s3://${DataPipelineBucket}/test/poems.txt
+Outputs:
+  StorageStackName:
+    Description: AWS CloudFormation Stack Name for Storage Stack
+    Value: !Ref AWS::StackName
+    Export:
+      Name: StorageStackName
+  DataPipelineBucketArn:
+    Description: AWS CloudFormation Stack Arn for Storage Stack
+    Value: !GetAtt DataPipelineBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-Data-Pipeline-Bucket-Arn

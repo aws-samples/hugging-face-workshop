@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Poetry of NLP Workshop Root Stack
+Parameters:
+  InfraResourcesBucket:
+    Type: String
+    Description: Enter the S3 bucket where workshop cloudformation resources have been uploaded
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://${InfraResourcesBucket}.s3.${AWS::Region}.amazonaws.com/templates/network-stack.yaml
+  StorageStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://${InfraResourcesBucket}.s3.${AWS::Region}.amazonaws.com/templates/storage-stack.yaml
+  SageMakerStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://${InfraResourcesBucket}.s3.${AWS::Region}.amazonaws.com/templates/sagemaker-stack.yaml
+      Parameters:
+        NetworkStackName: !GetAtt NetworkStack.Outputs.NetworkStackName
+        InfraResourcesBucket: !Ref InfraResourcesBucket
+  EndpointStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: SageMakerStack
+    Properties:
+      TemplateURL: !Sub https://${InfraResourcesBucket}.s3.${AWS::Region}.amazonaws.com/templates/endpoint-stack.yaml
+      Parameters:
+        InfraResourcesBucket: !Ref InfraResourcesBucket
+        SageMakerStackName: !GetAtt SageMakerStack.Outputs.SageMakerStackName
+        StorageStackName: !GetAtt StorageStack.Outputs.StorageStackName
